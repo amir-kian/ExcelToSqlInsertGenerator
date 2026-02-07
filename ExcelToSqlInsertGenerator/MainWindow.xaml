@@ -102,9 +102,12 @@
                 <Button x:Name="BtnGenerate" Content="Generate INSERT script" Click="BtnGenerate_Click" Padding="14,8" Margin="0,0,8,0" IsEnabled="False"/>
                 <Button x:Name="BtnCopy" Content="Copy to clipboard" Click="BtnCopy_Click" Padding="14,8" Margin="0,0,8,0" IsEnabled="False"/>
                 <Button x:Name="BtnSave" Content="Save to file..." Click="BtnSave_Click" Padding="14,8" Margin="0,0,8,0" IsEnabled="False"/>
+                <Button x:Name="BtnCancelSave" Content="Cancel save" Click="BtnCancelSave_Click" Padding="14,8" Margin="0,0,8,0" Visibility="Collapsed" ToolTip="Cancel the save in progress"/>
                 <Button x:Name="BtnReset" Content="Reset" Click="BtnReset_Click" Padding="14,8" Margin="0,0,0,0" ToolTip="Clear mapping selections and generated SQL"/>
+                <TextBlock Text="Chunk size (0 = whole file):" VerticalAlignment="Center" Margin="16,0,4,0"/>
+                <TextBox x:Name="TxtChunkSize" Width="60" Padding="4,2" VerticalContentAlignment="Center" Text="0" ToolTip="When saving: 0 = single file; &gt;0 = split into multiple files with N inserts each"/>
             </StackPanel>
-            <ProgressBar x:Name="GenerateProgressBar" Grid.Row="1" Height="4" Margin="0,4,0,0" IsIndeterminate="True" Visibility="Collapsed"/>
+            <ProgressBar x:Name="GenerateProgressBar" Grid.Row="1" Height="6" Margin="0,4,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed" IsIndeterminate="False"/>
             <TextBlock x:Name="TxtGenerateStatus" Grid.Row="2" Margin="0,4,0,0" TextWrapping="Wrap" Visibility="Collapsed"
                        Foreground="#333" VerticalAlignment="Center"/>
         </Grid>

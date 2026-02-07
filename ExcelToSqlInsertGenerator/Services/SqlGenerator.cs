@@ -14,11 +14,13 @@ public static class SqlGenerator
     public static string Generate(
         string insertTemplate,
         List<SqlValuePlaceholder> placeholders,
-        List<Dictionary<string, object>> rows)
+        List<Dictionary<string, object>> rows,
+        IProgress<(int current, int total)>? progress = null)
     {
         var sb = new StringBuilder();
+        int total = rows.Count;
+        int reportInterval = Math.Max(1, total / 100); // Report at most 100 times
 
-        // Split template at VALUES
         var valuesIndex = insertTemplate
             .IndexOf("VALUES", StringComparison.OrdinalIgnoreCase);
 
@@ -31,9 +33,12 @@ public static class SqlGenerator
         {
             var row = rows[rowIndex];
             var values = placeholders
-                .Select((p, colIndex) => ResolveValue(p, row, rowIndex + 2, colIndex)); // +2 = 1-based + header row
+                .Select((p, colIndex) => ResolveValue(p, row, rowIndex + 2, colIndex));
 
             sb.AppendLine($"{insertHeader} ({string.Join(",", values)});");
+
+            if (progress != null && (rowIndex % reportInterval == 0 || rowIndex == rows.Count - 1))
+                progress.Report((rowIndex + 1, total));
         }
 
         return sb.ToString();

@@ -1,5 +1,4 @@
 using System.Windows;
-using System.Windows.Threading;
 using OfficeOpenXml;
 
 namespace ExcelToSqlInsertGenerator;
