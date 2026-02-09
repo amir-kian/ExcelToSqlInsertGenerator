@@ -81,19 +81,21 @@ public static class SqlGenerator
             return s.Length > maxStringLength ? s.Substring(0, maxStringLength) + "…[truncated]" : s;
         }
 
-        // (Condition): read from current row using INSERT column name as Excel column (case-insensitive), then apply ValueMap only
+        // (Condition): read from ConditionColumn if set, else INSERT column name; then apply ValueMap or use value as SQL
         if (p.SelectedExcelColumn == AppConstants.ConditionOption)
         {
-            if (string.IsNullOrWhiteSpace(p.ValueMap) || string.IsNullOrWhiteSpace(p.ColumnName))
-                return "NULL";
-            if (!TryGetRowValue(row, p.ColumnName, out var condValue) || condValue == null || condValue == DBNull.Value)
+            if (string.IsNullOrWhiteSpace(p.ValueMap)) return "NULL";
+            string columnToRead = !string.IsNullOrWhiteSpace(p.ConditionColumn) ? p.ConditionColumn! : (p.ColumnName ?? "");
+            if (string.IsNullOrWhiteSpace(columnToRead)) return "NULL";
+            if (!TryGetRowValue(row, columnToRead, out var condValue) || condValue == null || condValue == DBNull.Value)
                 return "NULL";
             var condType = condValue.GetType();
             if (condType.IsArray && condValue is byte[]) return "NULL";
             if (condType.Name.Contains("Error", StringComparison.OrdinalIgnoreCase)) return "NULL";
             string condStr = ToSafeString(condValue).Trim();
             var mapped = TryApplyValueMap(condStr, p.ValueMap);
-            return mapped ?? "NULL";
+            if (mapped != null) return mapped;
+            return FormatValueAsSql(condValue, p.SqlType, maxStringLength);
         }
 
         if (!TryGetRowValue(row, p.SelectedExcelColumn, out var value) || value == null || value == DBNull.Value)
@@ -163,13 +165,31 @@ public static class SqlGenerator
 
     private static bool ValueMapKeyMatches(string key, string cellValueStr)
     {
-        if (string.IsNullOrEmpty(cellValueStr) && string.IsNullOrEmpty(key)) return true;
-        if (string.IsNullOrEmpty(cellValueStr) || string.IsNullOrEmpty(key)) return false;
-        if (string.Equals(key.Trim(), cellValueStr.Trim(), StringComparison.OrdinalIgnoreCase)) return true;
-        if (double.TryParse(key, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var keyNum) &&
-            double.TryParse(cellValueStr, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var cellNum))
+        string nKey = NormalizeForMatch(key);
+        string nCell = NormalizeForMatch(cellValueStr);
+        if (string.IsNullOrEmpty(nCell) && string.IsNullOrEmpty(nKey)) return true;
+        if (string.IsNullOrEmpty(nCell) || string.IsNullOrEmpty(nKey)) return false;
+        if (string.Equals(nKey, nCell, StringComparison.OrdinalIgnoreCase)) return true;
+        if (double.TryParse(nKey, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var keyNum) &&
+            double.TryParse(nCell, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var cellNum))
             return Math.Abs(keyNum - cellNum) < 1e-9;
         return false;
+    }
+
+    /// <summary>Trim and collapse multiple whitespace to single space so "Not  found" matches "Not found".</summary>
+    private static string NormalizeForMatch(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s ?? "";
+        var t = s.Trim();
+        if (t.Length == 0) return t;
+        var sb = new StringBuilder(t.Length);
+        bool space = false;
+        for (int i = 0; i < t.Length; i++)
+        {
+            if (char.IsWhiteSpace(t[i])) { if (!space) { sb.Append(' '); space = true; } }
+            else { sb.Append(t[i]); space = false; }
+        }
+        return sb.ToString().Trim();
     }
 
     /// <summary>Gets value from row by column name with case-insensitive key match (Excel headers may differ in casing from INSERT column names).</summary>
@@ -184,6 +204,39 @@ public static class SqlGenerator
         }
         value = null;
         return false;
+    }
+
+    /// <summary>When no ValueMap match: format the cell value as SQL (e.g. N'...' for nvarchar, '...' for uniqueidentifier).</summary>
+    private static string FormatValueAsSql(object value, string sqlType, int maxStringLength)
+    {
+        string ToS(object v)
+        {
+            var s = v?.ToString() ?? "";
+            return s.Length > maxStringLength ? s.Substring(0, maxStringLength) + "…[truncated]" : s;
+        }
+        try
+        {
+            if (sqlType.StartsWith("nvarchar", StringComparison.OrdinalIgnoreCase))
+                return $"N'{ToS(value).Replace("'", "''")}'";
+            if (sqlType.StartsWith("uniqueidentifier", StringComparison.OrdinalIgnoreCase))
+                return $"'{ToS(value)}'";
+            if (sqlType.Equals("bit", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value is bool b) return b ? "1" : "0";
+                if (value is int i) return i != 0 ? "1" : "0";
+                if (value is string str && (str.Equals("1", StringComparison.OrdinalIgnoreCase) || str.Equals("true", StringComparison.OrdinalIgnoreCase) || str.Equals("yes", StringComparison.OrdinalIgnoreCase))) return "1";
+                return Convert.ToBoolean(value) ? "1" : "0";
+            }
+            if (sqlType.StartsWith("datetime", StringComparison.OrdinalIgnoreCase) || sqlType.StartsWith("date", StringComparison.OrdinalIgnoreCase))
+            {
+                var dt = ToDateTime(value);
+                return $"'{dt:yyyy-MM-dd HH:mm:ss.fff}'";
+            }
+            if (sqlType.StartsWith("varchar", StringComparison.OrdinalIgnoreCase))
+                return $"'{ToS(value).Replace("'", "''")}'";
+            return ToS(value);
+        }
+        catch { return "NULL"; }
     }
 
     /// <summary>Converts a value to DateTime; handles Excel OLE date (double) and standard DateTime.</summary>

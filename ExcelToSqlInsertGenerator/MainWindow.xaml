@@ -88,12 +88,22 @@
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Column for condition" Width="160">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <ComboBox ItemsSource="{Binding ExcelColumns, ElementName=RootWindow}"
+                                          SelectedItem="{Binding ConditionColumn, UpdateSourceTrigger=PropertyChanged}"
+                                          IsEditable="False" Margin="2"
+                                          ToolTip="When Source=(Condition): which Excel column to read (e.g. Action). If empty, uses INSERT column name."/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                     <DataGridTemplateColumn Header="When value = ... use (e.g. 1=N'Man';2=N'Woman')" Width="220">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <TextBox Text="{Binding ValueMap, UpdateSourceTrigger=PropertyChanged}" 
                                          Margin="2"
-                                         ToolTip="When Source=(Condition): uses value from Excel column with same name as INSERT column; if it equals X use SQL Y. Format: 1=N'Man';2=N'Woman'"/>
+                                         ToolTip="When Source=(Condition): if Excel value equals X use SQL Y. Use 'Column for condition' to pick which Excel column. Format: Not found='guid';Other=N'Text'"/>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
