@@ -30,6 +30,8 @@ public static class MappingCache
         public string? SelectedExcelColumn { get; set; }
         public bool UseFixedValue { get; set; }
         public string? FixedValue { get; set; }
+        public string? ValueMap { get; set; }
+        public string? ConditionColumn { get; set; }
     }
 
     /// <summary>Save current placeholder mappings to cache (call after or before execution).</summary>
@@ -47,7 +49,9 @@ public static class MappingCache
                     SqlType = p.SqlType ?? "",
                     SelectedExcelColumn = p.SelectedExcelColumn,
                     UseFixedValue = p.UseFixedValue,
-                    FixedValue = p.FixedValue
+                    FixedValue = p.FixedValue,
+                    ValueMap = p.ValueMap,
+                    ConditionColumn = p.ConditionColumn
                 });
             }
             var json = JsonSerializer.Serialize(entries, JsonOptions);
@@ -88,13 +92,20 @@ public static class MappingCache
             if (!dict.TryGetValue(key, out var e)) continue;
             if (!string.IsNullOrEmpty(e.SelectedExcelColumn))
             {
-                if (validExcelColumns == null || validExcelColumns.Any(c => string.Equals(c, e.SelectedExcelColumn, StringComparison.OrdinalIgnoreCase)))
+                if (string.Equals(e.SelectedExcelColumn, ExcelToSqlInsertGenerator.AppConstants.ConditionOption, StringComparison.OrdinalIgnoreCase))
+                    p.SelectedExcelColumn = ExcelToSqlInsertGenerator.AppConstants.ConditionOption;
+                else if (validExcelColumns == null || validExcelColumns.Any(c => string.Equals(c, e.SelectedExcelColumn, StringComparison.OrdinalIgnoreCase)))
                     p.SelectedExcelColumn = e.SelectedExcelColumn;
                 else
                     p.SelectedExcelColumn = null;
             }
             p.UseFixedValue = e.UseFixedValue;
             p.FixedValue = e.FixedValue;
+            p.ValueMap = e.ValueMap;
+            if (!string.IsNullOrEmpty(e.ConditionColumn) && (validExcelColumns == null || validExcelColumns.Any(c => string.Equals(c, e.ConditionColumn, StringComparison.OrdinalIgnoreCase))))
+                p.ConditionColumn = e.ConditionColumn;
+            else
+                p.ConditionColumn = null;
         }
     }
 }

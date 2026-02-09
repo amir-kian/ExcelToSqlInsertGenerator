@@ -85,6 +85,7 @@ public partial class MainWindow : Window
                 MappingOptions.Add(h);
             }
             MappingOptions.Add(AppConstants.CustomTextOption);
+            MappingOptions.Add(AppConstants.ConditionOption);
 
             int cols = _excelReader.Headers.Count;
             int rows = _excelReader.Rows.Count;
@@ -215,6 +216,8 @@ public partial class MainWindow : Window
             p.SelectedExcelColumn = null;
             p.FixedValue = null;
             p.UseFixedValue = false;
+            p.ValueMap = null;
+            p.ConditionColumn = null;
         }
         GridMappings.ItemsSource = null;
         GridMappings.ItemsSource = Placeholders;

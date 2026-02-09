@@ -13,4 +13,10 @@ public class SqlValuePlaceholder
 
     /// <summary>Literal SQL fragment when UseFixedValue is true (e.g. GETDATE(), N'constant', NULL).</summary>
     public string? FixedValue { get; set; }
+
+    /// <summary>When Excel value equals X use SQL Y. Format: 1=N'Man';2=N'Woman' (semicolon-separated, each part is value=SQL).</summary>
+    public string? ValueMap { get; set; }
+
+    /// <summary>When Source = (Condition), the Excel column to read the value from for the ValueMap lookup.</summary>
+    public string? ConditionColumn { get; set; }
 }

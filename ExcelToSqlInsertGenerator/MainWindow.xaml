@@ -69,22 +69,31 @@
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="INSERT column" Binding="{Binding ColumnName}" Width="140" IsReadOnly="True"/>
                     <DataGridTextColumn Header="SQL type" Binding="{Binding SqlType}" Width="120" IsReadOnly="True"/>
-                    <DataGridTemplateColumn Header="Source (Excel column or Custom)" Width="*">
+                    <DataGridTemplateColumn Header="Source (Excel column or Your own value)" Width="*">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <ComboBox ItemsSource="{Binding MappingOptions, ElementName=RootWindow}"
                                           SelectedItem="{Binding SelectedExcelColumn, UpdateSourceTrigger=PropertyChanged}"
                                           IsEditable="False" Margin="2"
-                                          ToolTip="Select an Excel column or '(Custom text)' to enter your own value"/>
+                                          ToolTip="Select Excel column, '(Custom text)' for fixed value, or '(Condition)' to use When value = ... use"/>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
-                    <DataGridTemplateColumn Header="Custom text (when Source = Custom)" Width="*">
+                    <DataGridTemplateColumn Header="Your own value (when Source = Custom text)" Width="*">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <TextBox Text="{Binding FixedValue, UpdateSourceTrigger=PropertyChanged}" 
                                          Margin="2"
-                                         ToolTip="Enter SQL literal (e.g. GETDATE(), NEWID(), N'constant', NULL) when Source is Custom text"/>
+                                         ToolTip="Type the exact SQL to insert (e.g. 1, 0, NULL, GETDATE(), NEWID(), N'constant'). Used for every row when Source is Custom text."/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="When value = ... use (e.g. 1=N'Man';2=N'Woman')" Width="220">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBox Text="{Binding ValueMap, UpdateSourceTrigger=PropertyChanged}" 
+                                         Margin="2"
+                                         ToolTip="When Source=(Condition): uses value from Excel column with same name as INSERT column; if it equals X use SQL Y. Format: 1=N'Man';2=N'Woman'"/>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>

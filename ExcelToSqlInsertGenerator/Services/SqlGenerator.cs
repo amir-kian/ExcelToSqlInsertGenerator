@@ -74,18 +74,40 @@ public static class SqlGenerator
         if (string.IsNullOrWhiteSpace(p.SelectedExcelColumn))
             return "NULL";
 
-        if (!row.TryGetValue(p.SelectedExcelColumn, out var value) || value == null || value == DBNull.Value)
+        int maxStringLength = AppSettings.SqlGenerator.MaxStringLength;
+        string ToSafeString(object v)
+        {
+            var s = v?.ToString() ?? "";
+            return s.Length > maxStringLength ? s.Substring(0, maxStringLength) + "…[truncated]" : s;
+        }
+
+        // (Condition): read from current row using INSERT column name as Excel column (case-insensitive), then apply ValueMap only
+        if (p.SelectedExcelColumn == AppConstants.ConditionOption)
+        {
+            if (string.IsNullOrWhiteSpace(p.ValueMap) || string.IsNullOrWhiteSpace(p.ColumnName))
+                return "NULL";
+            if (!TryGetRowValue(row, p.ColumnName, out var condValue) || condValue == null || condValue == DBNull.Value)
+                return "NULL";
+            var condType = condValue.GetType();
+            if (condType.IsArray && condValue is byte[]) return "NULL";
+            if (condType.Name.Contains("Error", StringComparison.OrdinalIgnoreCase)) return "NULL";
+            string condStr = ToSafeString(condValue).Trim();
+            var mapped = TryApplyValueMap(condStr, p.ValueMap);
+            return mapped ?? "NULL";
+        }
+
+        if (!TryGetRowValue(row, p.SelectedExcelColumn, out var value) || value == null || value == DBNull.Value)
             return "NULL";
 
         var valueType = value.GetType();
         if (valueType.IsArray && value is byte[]) return "NULL";
         if (valueType.Name.Contains("Error", StringComparison.OrdinalIgnoreCase)) return "NULL";
 
-        int maxStringLength = AppSettings.SqlGenerator.MaxStringLength;
-        string ToSafeString(object v)
+        string cellValueStr = ToSafeString(value).Trim();
+        if (!string.IsNullOrEmpty(p.ValueMap))
         {
-            var s = v?.ToString() ?? "";
-            return s.Length > maxStringLength ? s.Substring(0, maxStringLength) + "…[truncated]" : s;
+            var mapped = TryApplyValueMap(cellValueStr, p.ValueMap);
+            if (mapped != null) return mapped;
         }
 
         try
@@ -121,6 +143,47 @@ public static class SqlGenerator
             throw new InvalidOperationException(
                 $"{ex.Message} — {ColumnInfo()} (value type: {value?.GetType().Name ?? "null"}, value: {value})", ex);
         }
+    }
+
+    /// <summary>If cell value matches a key in valueMap (e.g. 1=N'Man'), return the SQL expression. Keys match case-insensitive; numeric keys also match Excel doubles (e.g. 1.0 matches "1").</summary>
+    private static string? TryApplyValueMap(string cellValueStr, string valueMap)
+    {
+        if (string.IsNullOrEmpty(valueMap)) return null;
+        foreach (var part in valueMap.Split(new[] { ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = part.IndexOf('=');
+            if (eq <= 0) continue;
+            string key = part.Substring(0, eq).Trim();
+            string sqlExpr = part.Substring(eq + 1).Trim();
+            if (string.IsNullOrEmpty(sqlExpr)) continue;
+            if (ValueMapKeyMatches(key, cellValueStr)) return sqlExpr;
+        }
+        return null;
+    }
+
+    private static bool ValueMapKeyMatches(string key, string cellValueStr)
+    {
+        if (string.IsNullOrEmpty(cellValueStr) && string.IsNullOrEmpty(key)) return true;
+        if (string.IsNullOrEmpty(cellValueStr) || string.IsNullOrEmpty(key)) return false;
+        if (string.Equals(key.Trim(), cellValueStr.Trim(), StringComparison.OrdinalIgnoreCase)) return true;
+        if (double.TryParse(key, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var keyNum) &&
+            double.TryParse(cellValueStr, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var cellNum))
+            return Math.Abs(keyNum - cellNum) < 1e-9;
+        return false;
+    }
+
+    /// <summary>Gets value from row by column name with case-insensitive key match (Excel headers may differ in casing from INSERT column names).</summary>
+    private static bool TryGetRowValue(Dictionary<string, object> row, string columnName, out object? value)
+    {
+        if (row.TryGetValue(columnName, out value!)) return true;
+        var key = row.Keys.FirstOrDefault(k => string.Equals(k, columnName, StringComparison.OrdinalIgnoreCase));
+        if (key != null)
+        {
+            value = row[key];
+            return true;
+        }
+        value = null;
+        return false;
     }
 
     /// <summary>Converts a value to DateTime; handles Excel OLE date (double) and standard DateTime.</summary>
