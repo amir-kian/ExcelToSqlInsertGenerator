@@ -18,6 +18,7 @@ public partial class MainWindow : Window
     private string _insertTemplate = string.Empty;
     private ExcelReader? _excelReader;
     private System.Threading.CancellationTokenSource? _saveCts;
+    private System.Threading.CancellationTokenSource? _executeCts;
 
     public MainWindow()
     {
@@ -94,10 +95,9 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            string message = ex.Message;
-            if (ex.InnerException != null)
-                message += " " + ex.InnerException.Message;
-            SetExcelStatus("Error: " + message, isError: true);
+            string fullError = GetFullExceptionMessage(ex);
+            SetExcelStatus("Error: " + ex.Message, isError: true);
+            MessageBox.Show(this, "Load Excel failed:\n\n" + fullError, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -138,6 +138,8 @@ public partial class MainWindow : Window
             GridMappings.ItemsSource = null;
             GridMappings.ItemsSource = Placeholders;
             BtnGenerate.IsEnabled = true;
+            BtnExecute.IsEnabled = true;
+            BtnValidate.IsEnabled = true;
         }
     }
 
@@ -175,14 +177,14 @@ public partial class MainWindow : Window
             SetGenerateStatus($"Generated {insertCount} INSERT statement(s).", isError: false);
             BtnCopy.IsEnabled = true;
             BtnSave.IsEnabled = true;
+            BtnExecute.IsEnabled = true;
         }
         catch (Exception ex)
         {
-            string message = ex.Message;
-            if (ex.InnerException != null)
-                message += " — " + ex.InnerException.Message;
-            SetGenerateStatus("Error: " + message, isError: true);
+            string fullError = GetFullExceptionMessage(ex);
+            SetGenerateStatus("Error: " + ex.Message, isError: true);
             TxtOutput.Clear();
+            MessageBox.Show(this, "Generate failed:\n\n" + fullError, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -216,6 +218,9 @@ public partial class MainWindow : Window
         SetGenerateStatus("", isError: false);
         BtnCopy.IsEnabled = false;
         BtnSave.IsEnabled = false;
+        BtnExecute.IsEnabled = false;
+        BtnValidate.IsEnabled = false;
+        TxtExecuteLog.Clear();
     }
 
     private void BtnCopy_Click(object sender, RoutedEventArgs e)
@@ -253,18 +258,21 @@ public partial class MainWindow : Window
         _saveCts = new System.Threading.CancellationTokenSource();
         var token = _saveCts.Token;
 
+        // Capture UI values on UI thread before background work (avoid cross-thread access)
+        string filePath = dlg.FileName;
+        string output = TxtOutput.Text;
+
         try
         {
             if (chunkSize <= 0)
             {
                 await System.Threading.Tasks.Task.Run(() =>
-                    File.WriteAllText(dlg.FileName, TxtOutput.Text), token).ConfigureAwait(true);
+                    File.WriteAllText(filePath, output), token).ConfigureAwait(true);
                 MessageBox.Show(this, "Script saved.", "Done", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
-            var output = TxtOutput.Text;
-            var result = await System.Threading.Tasks.Task.Run(() => SaveChunked(output, dlg.FileName, chunkSize, token)).ConfigureAwait(true);
+            var result = await System.Threading.Tasks.Task.Run(() => SaveChunked(output, filePath, chunkSize, token)).ConfigureAwait(true);
             MessageBox.Show(this, $"Saved {result.written} file(s) ({result.total} INSERT statements, {chunkSize} per file).", "Done", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (OperationCanceledException)
@@ -273,7 +281,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, "Save failed: " + ex.Message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, "Save failed:\n\n" + GetFullExceptionMessage(ex), "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -326,5 +334,224 @@ public partial class MainWindow : Window
     private void BtnCancelSave_Click(object sender, RoutedEventArgs e)
     {
         _saveCts?.Cancel();
+    }
+
+    private async void BtnValidate_Click(object sender, RoutedEventArgs e)
+    {
+        if (_excelReader == null || string.IsNullOrEmpty(_insertTemplate) || Placeholders.Count == 0)
+        {
+            MessageBox.Show(this, "Parse template, load Excel, and map columns first.", "Not ready", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var template = _insertTemplate;
+        var placeholders = Placeholders.ToList();
+        var rows = _excelReader.Rows;
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "No data rows to validate.", "Not ready", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        BtnValidate.IsEnabled = false;
+        ExecuteProgressBar.Visibility = Visibility.Visible;
+        ExecuteProgressBar.Value = 0;
+        ExecuteProgressBar.Maximum = 100;
+        TxtExecuteLog.Clear();
+        TxtExecuteStatus.Text = $"Validating: 0 / {rows.Count:N0}...";
+        TxtExecuteStatus.Visibility = Visibility.Visible;
+
+        var progress = new System.Progress<(int current, int total)>(p =>
+        {
+            ExecuteProgressBar.Value = p.total > 0 ? (p.current * 100.0 / p.total) : 0;
+            TxtExecuteStatus.Text = $"Validating: {p.current:N0} / {p.total:N0}...";
+        });
+
+        try
+        {
+            var result = await System.Threading.Tasks.Task.Run(() =>
+                DbExecutor.ValidateBeforeExecute(template, placeholders, rows, progress, System.Threading.CancellationToken.None)).ConfigureAwait(true);
+
+            var log = new System.Text.StringBuilder();
+            if (result.Ok)
+            {
+                log.AppendLine("Validation OK: All rows can generate valid SQL.");
+            }
+            else
+            {
+                log.AppendLine($"Validation found {result.Issues.Count} problematic row(s):");
+                log.AppendLine();
+                int show = Math.Min(result.Issues.Count, 100);
+                for (int i = 0; i < show; i++)
+                {
+                    var issue = result.Issues[i];
+                    log.AppendLine($"  Row {issue.RowIndex}: {issue.ErrorMessage}");
+                }
+                if (result.Issues.Count > show)
+                    log.AppendLine($"  ... and {result.Issues.Count - show} more.");
+            }
+            TxtExecuteLog.Text = log.ToString();
+            TxtExecuteStatus.Text = result.Ok ? "Validation OK." : $"Validation: {result.Issues.Count} issue(s) found.";
+            MessageBox.Show(this, result.Ok ? "All rows validated OK." : $"Found {result.Issues.Count} problematic row(s). See log for details.", "Validate", MessageBoxButton.OK, result.Ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        }
+        catch (Exception ex)
+        {
+            TxtExecuteLog.Text = "Error: " + GetFullExceptionMessage(ex);
+            TxtExecuteStatus.Text = "Error.";
+            MessageBox.Show(this, "Validation failed:\n\n" + ex.Message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            BtnValidate.IsEnabled = true;
+            ExecuteProgressBar.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private async void BtnExecute_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(TxtConnectionString.Text))
+        {
+            MessageBox.Show(this, "Enter a connection string.", "Not ready", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (_excelReader == null || string.IsNullOrEmpty(_insertTemplate) || Placeholders.Count == 0)
+        {
+            MessageBox.Show(this, "Parse template, load Excel, and map columns first.", "Not ready", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        string connectionString = TxtConnectionString.Text;
+        string template = _insertTemplate;
+        var placeholders = Placeholders.ToList();
+        var rows = _excelReader.Rows;
+        int totalCount = rows.Count;
+
+        if (totalCount == 0)
+        {
+            MessageBox.Show(this, "No data rows to execute.", "Not ready", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        int startRow = 0;
+        int chunkSize = 0;
+        if (!string.IsNullOrWhiteSpace(TxtExecuteStartRow.Text) && int.TryParse(TxtExecuteStartRow.Text.Trim(), out var sr))
+            startRow = Math.Max(0, sr);
+        if (!string.IsNullOrWhiteSpace(TxtExecuteChunkSize.Text) && int.TryParse(TxtExecuteChunkSize.Text.Trim(), out var cs))
+            chunkSize = Math.Max(0, cs);
+
+        BtnExecute.IsEnabled = false;
+        BtnCancelExecute.Visibility = Visibility.Visible;
+        ExecuteProgressBar.Visibility = Visibility.Visible;
+        ExecuteProgressBar.Value = 0;
+        ExecuteProgressBar.Maximum = 100;
+        TxtExecuteLog.Clear();
+        TxtExecuteStatus.Text = $"Executing: 0 / {totalCount:N0}...";
+        TxtExecuteStatus.Visibility = Visibility.Visible;
+
+        _executeCts = new System.Threading.CancellationTokenSource();
+        var token = _executeCts.Token;
+        var progress = new System.Progress<(int current, int total)>(p =>
+        {
+            ExecuteProgressBar.Value = p.total > 0 ? (p.current * 100.0 / p.total) : 0;
+            TxtExecuteStatus.Text = $"Executing: {p.current:N0} / {p.total:N0}...";
+        });
+
+        try
+        {
+            // Execute from source in safe mode: GC every 25k rows, 120s timeout, optional chunk/resume.
+            var result = await System.Threading.Tasks.Task.Run(() =>
+                DbExecutor.ExecuteFromSourceSafe(connectionString, template, placeholders, rows, progress, token, startRow, chunkSize)).ConfigureAwait(true);
+
+            var log = new System.Text.StringBuilder();
+            int lastProcessed = startRow + result.Inserted + result.Failed;
+            if (result.LastProcessedRow.HasValue) lastProcessed = result.LastProcessedRow.Value;
+            log.AppendLine($"Inserted: {result.Inserted}");
+            log.AppendLine($"Failed:   {result.Failed}");
+            if (!string.IsNullOrEmpty(result.StoppedWithError))
+            {
+                log.AppendLine();
+                log.AppendLine($"Stopped at row {lastProcessed}: {result.StoppedWithError}");
+                log.AppendLine($"Set Start row to {lastProcessed} and run again to resume.");
+            }
+            if (chunkSize > 0 && lastProcessed < totalCount && string.IsNullOrEmpty(result.StoppedWithError))
+                log.AppendLine($"Processed rows {startRow}-{lastProcessed - 1}. To continue, set Start row to {lastProcessed} and run again.");
+            if (result.FailedRows.Count > 0)
+            {
+                log.AppendLine();
+                log.AppendLine("Failed rows (Row | ID value | Error):");
+                foreach (var fr in result.FailedRows)
+                {
+                    if (fr.RowIndex < 0)
+                        log.AppendLine($"  {fr.ErrorMessage}");
+                    else
+                    {
+                        string idInfo = !string.IsNullOrEmpty(fr.IdValue) ? fr.IdValue : "(no ID)";
+                        log.AppendLine($"  Row {fr.RowIndex}: ID={idInfo} | {fr.ErrorMessage}");
+                    }
+                }
+            }
+            TxtExecuteLog.Text = log.ToString();
+            TxtExecuteStatus.Text = $"Done. Inserted: {result.Inserted}, Failed: {result.Failed}";
+            if (!string.IsNullOrEmpty(result.StoppedWithError))
+            {
+                TxtExecuteStartRow.Text = lastProcessed.ToString();
+                MessageBox.Show(this, $"Stopped at row {lastProcessed}:\n{result.StoppedWithError}\n\nInserted: {result.Inserted}, Failed: {result.Failed}\n\nStart row updated to {lastProcessed}. Run again to resume.", "Execution stopped", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            else if (chunkSize > 0 && lastProcessed < totalCount)
+            {
+                TxtExecuteStartRow.Text = lastProcessed.ToString();
+                MessageBox.Show(this, $"Chunk complete. Inserted: {result.Inserted}, Failed: {result.Failed}\n\nStart row updated to {lastProcessed}. Run again to continue.", "Chunk complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show(this, $"Inserted: {result.Inserted}\nFailed: {result.Failed}", "Execute complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            TxtExecuteLog.Text = "Execution cancelled.";
+            TxtExecuteStatus.Text = "Cancelled.";
+            MessageBox.Show(this, "Execution cancelled.", "Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (AggregateException agg)
+        {
+            var inner = agg.Flatten().InnerException ?? agg;
+            string fullError = GetFullExceptionMessage(inner);
+            TxtExecuteLog.Text = "Error: " + fullError;
+            TxtExecuteStatus.Text = "Error.";
+            MessageBox.Show(this, "Execute failed:\n\n" + fullError, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        catch (Exception ex)
+        {
+            string fullError = GetFullExceptionMessage(ex);
+            TxtExecuteLog.Text = "Error: " + fullError;
+            TxtExecuteStatus.Text = "Error.";
+            MessageBox.Show(this, "Execute failed:\n\n" + fullError, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _executeCts?.Dispose();
+            _executeCts = null;
+            BtnExecute.IsEnabled = true;
+            BtnCancelExecute.Visibility = Visibility.Collapsed;
+            ExecuteProgressBar.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void BtnCancelExecute_Click(object sender, RoutedEventArgs e)
+    {
+        _executeCts?.Cancel();
+    }
+
+    private static string GetFullExceptionMessage(Exception ex)
+    {
+        if (ex is AggregateException agg)
+            ex = agg.InnerException ?? agg;
+        var sb = new System.Text.StringBuilder();
+        sb.Append(ex.Message);
+        if (ex.InnerException != null)
+            sb.Append("\n\nInner: ").Append(GetFullExceptionMessage(ex.InnerException));
+        sb.Append("\n\n").Append(ex.StackTrace);
+        return sb.ToString();
     }
 }

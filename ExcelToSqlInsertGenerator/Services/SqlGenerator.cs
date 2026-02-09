@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using ExcelToSqlInsertGenerator.Configuration;
 using ExcelToSqlInsertGenerator.Models;
 using ExcelToSqlInsertGenerator;
 
@@ -19,7 +20,7 @@ public static class SqlGenerator
     {
         var sb = new StringBuilder();
         int total = rows.Count;
-        int reportInterval = Math.Max(1, total / 100); // Report at most 100 times
+        int reportInterval = Math.Max(1, total / AppSettings.SqlGenerator.ReportIntervalDivisor);
 
         var valuesIndex = insertTemplate
             .IndexOf("VALUES", StringComparison.OrdinalIgnoreCase);
@@ -44,6 +45,21 @@ public static class SqlGenerator
         return sb.ToString();
     }
 
+    /// <summary>Generate a single INSERT for one row (for streaming execution without building full SQL).</summary>
+    public static string GenerateSingleInsert(
+        string insertTemplate,
+        List<SqlValuePlaceholder> placeholders,
+        Dictionary<string, object> row,
+        int rowIndex)
+    {
+        var valuesIndex = insertTemplate.IndexOf("VALUES", StringComparison.OrdinalIgnoreCase);
+        if (valuesIndex == -1)
+            throw new Exception("INSERT template must contain VALUES keyword.");
+        var insertHeader = insertTemplate.Substring(0, valuesIndex + 6);
+        var values = placeholders.Select((p, colIndex) => ResolveValue(p, row, rowIndex + 2, colIndex));
+        return $"{insertHeader} ({string.Join(",", values)});";
+    }
+
     private static string ResolveValue(
         SqlValuePlaceholder p,
         Dictionary<string, object> row,
@@ -61,16 +77,32 @@ public static class SqlGenerator
         if (!row.TryGetValue(p.SelectedExcelColumn, out var value) || value == null || value == DBNull.Value)
             return "NULL";
 
+        var valueType = value.GetType();
+        if (valueType.IsArray && value is byte[]) return "NULL";
+        if (valueType.Name.Contains("Error", StringComparison.OrdinalIgnoreCase)) return "NULL";
+
+        int maxStringLength = AppSettings.SqlGenerator.MaxStringLength;
+        string ToSafeString(object v)
+        {
+            var s = v?.ToString() ?? "";
+            return s.Length > maxStringLength ? s.Substring(0, maxStringLength) + "…[truncated]" : s;
+        }
+
         try
         {
             if (p.SqlType.StartsWith("nvarchar", StringComparison.OrdinalIgnoreCase))
-                return $"N'{(value?.ToString() ?? "").Replace("'", "''")}'";
+                return $"N'{ToSafeString(value).Replace("'", "''")}'";
 
             if (p.SqlType.StartsWith("uniqueidentifier", StringComparison.OrdinalIgnoreCase))
-                return $"'{value}'";
+                return $"'{ToSafeString(value)}'";
 
             if (p.SqlType.Equals("bit", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value is bool b) return b ? "1" : "0";
+                if (value is int i) return i != 0 ? "1" : "0";
+                if (value is string str && (str.Equals("1", StringComparison.OrdinalIgnoreCase) || str.Equals("true", StringComparison.OrdinalIgnoreCase) || str.Equals("yes", StringComparison.OrdinalIgnoreCase))) return "1";
                 return Convert.ToBoolean(value) ? "1" : "0";
+            }
 
             if (p.SqlType.StartsWith("datetime", StringComparison.OrdinalIgnoreCase) ||
                 p.SqlType.StartsWith("date", StringComparison.OrdinalIgnoreCase))
@@ -80,9 +112,9 @@ public static class SqlGenerator
             }
 
             if (p.SqlType.StartsWith("varchar", StringComparison.OrdinalIgnoreCase))
-                return $"'{(value?.ToString() ?? "").Replace("'", "''")}'";
+                return $"'{ToSafeString(value).Replace("'", "''")}'";
 
-            return value?.ToString() ?? "NULL";
+            return ToSafeString(value);
         }
         catch (Exception ex)
         {

@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using System.Windows;
 using OfficeOpenXml;
 
@@ -12,8 +13,20 @@ public partial class App : Application
 
         DispatcherUnhandledException += (s, args) =>
         {
-            MessageBox.Show(args.Exception.ToString(), "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(args.Exception.ToString(), "Unhandled Error", MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
+        };
+
+        TaskScheduler.UnobservedTaskException += (s, args) =>
+        {
+            MessageBox.Show(args.Exception?.ToString() ?? "Unknown task error", "Background Task Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            args.SetObserved();
+        };
+
+        AppDomain.CurrentDomain.UnhandledException += (s, args) =>
+        {
+            var ex = args.ExceptionObject as Exception;
+            MessageBox.Show(ex?.ToString() ?? args.ExceptionObject?.ToString() ?? "Fatal error", "Fatal Error", MessageBoxButton.OK, MessageBoxImage.Error);
         };
     }
 }

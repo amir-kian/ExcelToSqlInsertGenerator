@@ -1,6 +1,8 @@
+using ExcelToSqlInsertGenerator.Configuration;
+
 namespace ExcelToSqlInsertGenerator;
 
 public static class AppConstants
 {
-    public const string CustomTextOption = "(Custom text)";
+    public static string CustomTextOption => AppSettings.App.CustomTextOption;
 }

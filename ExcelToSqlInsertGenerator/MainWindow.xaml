@@ -14,7 +14,8 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="2*" MinHeight="120"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*" MinHeight="150"/>
+            <RowDefinition Height="*" MinHeight="120"/>
+            <RowDefinition Height="*" MinHeight="100"/>
         </Grid.RowDefinitions>
 
         <!-- Step 1: Sample INSERT -->
@@ -117,6 +118,48 @@
             <TextBox x:Name="TxtOutput" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" 
                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                      FontFamily="Consolas" FontSize="12" Padding="6"/>
+        </GroupBox>
+
+        <!-- Execute to database -->
+        <GroupBox Grid.Row="5" Header="4. Execute to database" Margin="0,8,0,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*" MinHeight="80"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Connection string:" VerticalAlignment="Center" Margin="4"/>
+                    <TextBox x:Name="TxtConnectionString" Grid.Column="1" Padding="6" Margin="4" VerticalContentAlignment="Center"
+                             ToolTip="e.g. Server=.;Database=MyDb;Trusted_Connection=True;TrustServerCertificate=True"/>
+                    <Button x:Name="BtnValidate" Grid.Column="2" Content="Validate before Execute" Click="BtnValidate_Click" Padding="12,6" Margin="4" IsEnabled="False"
+                            ToolTip="Check all rows for problems (bad data, Excel errors) without connecting to DB"/>
+                    <Button x:Name="BtnExecute" Grid.Column="3" Content="Execute INSERTs" Click="BtnExecute_Click" Padding="12,6" Margin="4" IsEnabled="False"
+                            ToolTip="Generate and execute each INSERT from Excel data (no need to Generate first)"/>
+                    <Button x:Name="BtnCancelExecute" Grid.Column="4" Content="Cancel" Click="BtnCancelExecute_Click" Padding="12,6" Margin="4"
+                            Visibility="Collapsed" ToolTip="Cancel execution"/>
+                </Grid>
+                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="4,2">
+                    <TextBlock Text="Start row (0 = beginning):" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBox x:Name="TxtExecuteStartRow" Width="70" Padding="4,2" VerticalContentAlignment="Center" Text="0" ToolTip="Resume from this row index (0-based) after a crash"/>
+                    <TextBlock Text="Chunk size (0 = all):" VerticalAlignment="Center" Margin="16,0,4,0"/>
+                    <TextBox x:Name="TxtExecuteChunkSize" Width="70" Padding="4,2" VerticalContentAlignment="Center" Text="0" ToolTip="Process only this many rows. Use 50000 for slow servers. Set Start row to resume after crash."/>
+                </StackPanel>
+                <ProgressBar x:Name="ExecuteProgressBar" Grid.Row="2" Height="4" Margin="4,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
+                <TextBlock x:Name="TxtExecuteStatus" Grid.Row="3" Margin="4" TextWrapping="Wrap" Visibility="Collapsed" Foreground="#333"/>
+                <TextBox x:Name="TxtExecuteLog" Grid.Row="4" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11" Padding="6" Margin="4"
+                         VerticalContentAlignment="Top" ToolTip="Log: inserted count, failed count, and failed row IDs"/>
+            </Grid>
         </GroupBox>
     </Grid>
 </Window>
