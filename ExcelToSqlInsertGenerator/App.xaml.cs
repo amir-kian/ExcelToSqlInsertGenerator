@@ -1,5 +1,6 @@
 using System.Threading.Tasks;
 using System.Windows;
+using ExcelToSqlInsertGenerator.Services;
 using OfficeOpenXml;
 
 namespace ExcelToSqlInsertGenerator;
@@ -9,6 +10,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        ExecuteLogger.EnsureLogDirectoryExists();
         ExcelPackage.License.SetNonCommercialPersonal("ExcelToSqlInsertGenerator");
 
         DispatcherUnhandledException += (s, args) =>

@@ -24,6 +24,9 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = this;
+        var cached = ConnectionStringCache.Load();
+        if (!string.IsNullOrEmpty(cached))
+            TxtConnectionString.Text = cached;
     }
 
     private void BtnParse_Click(object sender, RoutedEventArgs e)
@@ -135,6 +138,9 @@ public partial class MainWindow : Window
         if (Placeholders.Count > 0 && _excelReader != null && _excelReader.Headers.Count > 0)
         {
             GroupMapping.Visibility = Visibility.Visible;
+            GridMappings.ItemsSource = null;
+            GridMappings.ItemsSource = Placeholders;
+            MappingCache.ApplyTo(Placeholders, MappingOptions);
             GridMappings.ItemsSource = null;
             GridMappings.ItemsSource = Placeholders;
             BtnGenerate.IsEnabled = true;
@@ -433,11 +439,28 @@ public partial class MainWindow : Window
         }
 
         int startRow = 0;
+        int skipRows = 0;
         int chunkSize = 0;
         if (!string.IsNullOrWhiteSpace(TxtExecuteStartRow.Text) && int.TryParse(TxtExecuteStartRow.Text.Trim(), out var sr))
             startRow = Math.Max(0, sr);
+        if (!string.IsNullOrWhiteSpace(TxtExecuteSkipRows.Text) && int.TryParse(TxtExecuteSkipRows.Text.Trim(), out var skip) && skip > 0)
+            skipRows = skip;
         if (!string.IsNullOrWhiteSpace(TxtExecuteChunkSize.Text) && int.TryParse(TxtExecuteChunkSize.Text.Trim(), out var cs))
             chunkSize = Math.Max(0, cs);
+        int originalStartRow = startRow;
+        startRow = Math.Min(startRow + skipRows, totalCount);
+        if (skipRows > 0)
+            ExecuteLogger.LogSkippedRange(originalStartRow, startRow - 1, startRow);
+
+        bool parallelMode = ChkExecuteParallel.IsChecked == true;
+        if (parallelMode && chunkSize <= 0)
+        {
+            chunkSize = Math.Max(10000, totalCount / 4);
+            TxtExecuteChunkSize.Text = chunkSize.ToString();
+        }
+
+        MappingCache.Save(Placeholders);
+        ConnectionStringCache.Save(TxtConnectionString.Text);
 
         BtnExecute.IsEnabled = false;
         BtnCancelExecute.Visibility = Visibility.Visible;
@@ -452,16 +475,27 @@ public partial class MainWindow : Window
         var token = _executeCts.Token;
         var progress = new System.Progress<(int current, int total)>(p =>
         {
-            ExecuteProgressBar.Value = p.total > 0 ? (p.current * 100.0 / p.total) : 0;
-            TxtExecuteStatus.Text = $"Executing: {p.current:N0} / {p.total:N0}...";
+            Dispatcher.BeginInvoke(() =>
+            {
+                try
+                {
+                    ExecuteProgressBar.Value = p.total > 0 ? (p.current * 100.0 / p.total) : 0;
+                    TxtExecuteStatus.Text = $"Executing: {p.current:N0} / {p.total:N0}...";
+                }
+                catch { /* avoid UI update crashing the app */ }
+            }, System.Windows.Threading.DispatcherPriority.Background);
         });
 
         try
         {
-            // Execute from source in safe mode: GC every 25k rows, 120s timeout, optional chunk/resume.
-            var result = await System.Threading.Tasks.Task.Run(() =>
-                DbExecutor.ExecuteFromSourceSafe(connectionString, template, placeholders, rows, progress, token, startRow, chunkSize)).ConfigureAwait(true);
+            var result = parallelMode
+                ? await System.Threading.Tasks.Task.Run(() =>
+                    DbExecutor.ExecuteFromSourceParallelChunks(connectionString, template, placeholders, rows, progress, token, startRow, chunkSize)).ConfigureAwait(true)
+                : await System.Threading.Tasks.Task.Run(() =>
+                    DbExecutor.ExecuteFromSourceSafe(connectionString, template, placeholders, rows, progress, token, startRow, chunkSize)).ConfigureAwait(true);
 
+            try
+            {
             var log = new System.Text.StringBuilder();
             int lastProcessed = startRow + result.Inserted + result.Failed;
             if (result.LastProcessedRow.HasValue) lastProcessed = result.LastProcessedRow.Value;
@@ -472,6 +506,7 @@ public partial class MainWindow : Window
                 log.AppendLine();
                 log.AppendLine($"Stopped at row {lastProcessed}: {result.StoppedWithError}");
                 log.AppendLine($"Set Start row to {lastProcessed} and run again to resume.");
+                log.AppendLine("If it stops again at the same row, set Skip rows to 500–1000 to jump past the bad range.");
             }
             if (chunkSize > 0 && lastProcessed < totalCount && string.IsNullOrEmpty(result.StoppedWithError))
                 log.AppendLine($"Processed rows {startRow}-{lastProcessed - 1}. To continue, set Start row to {lastProcessed} and run again.");
@@ -490,12 +525,15 @@ public partial class MainWindow : Window
                     }
                 }
             }
+            string logPath = ExecuteLogger.GetLogFilePath();
+            log.AppendLine();
+            log.AppendLine($"Log file: {logPath}");
             TxtExecuteLog.Text = log.ToString();
             TxtExecuteStatus.Text = $"Done. Inserted: {result.Inserted}, Failed: {result.Failed}";
             if (!string.IsNullOrEmpty(result.StoppedWithError))
             {
                 TxtExecuteStartRow.Text = lastProcessed.ToString();
-                MessageBox.Show(this, $"Stopped at row {lastProcessed}:\n{result.StoppedWithError}\n\nInserted: {result.Inserted}, Failed: {result.Failed}\n\nStart row updated to {lastProcessed}. Run again to resume.", "Execution stopped", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(this, $"Stopped at row {lastProcessed}:\n{result.StoppedWithError}\n\nInserted: {result.Inserted}, Failed: {result.Failed}\n\nStart row updated to {lastProcessed}. Run again to resume.\n\nIf it stops again at the same row, set Skip rows to 500 or 1000 and run again to jump past the problematic range.", "Execution stopped", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             else if (chunkSize > 0 && lastProcessed < totalCount)
             {
@@ -505,6 +543,14 @@ public partial class MainWindow : Window
             else
             {
                 MessageBox.Show(this, $"Inserted: {result.Inserted}\nFailed: {result.Failed}", "Execute complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            }
+            catch (Exception uiEx)
+            {
+                ExecuteLogger.Error("Error updating UI after execute", uiEx);
+                TxtExecuteLog.Text = $"Inserted: {result.Inserted}, Failed: {result.Failed}. Error showing details: {uiEx.Message}";
+                TxtExecuteStatus.Text = "Done (see log).";
+                MessageBox.Show(this, $"Execute finished but failed to show full details.\n\nInserted: {result.Inserted}, Failed: {result.Failed}\n\nSee log: " + ExecuteLogger.GetLogFilePath(), "Execute complete", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
         catch (OperationCanceledException)
@@ -516,23 +562,36 @@ public partial class MainWindow : Window
         catch (AggregateException agg)
         {
             var inner = agg.Flatten().InnerException ?? agg;
-            string fullError = GetFullExceptionMessage(inner);
-            TxtExecuteLog.Text = "Error: " + fullError;
-            TxtExecuteStatus.Text = "Error.";
-            MessageBox.Show(this, "Execute failed:\n\n" + fullError, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (inner is OperationCanceledException)
+            {
+                TxtExecuteLog.Text = "Execution cancelled.";
+                TxtExecuteStatus.Text = "Cancelled.";
+                MessageBox.Show(this, "Execution cancelled.", "Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                string fullError = GetFullExceptionMessage(inner);
+                ExecuteLogger.Error("Execute failed (AggregateException)", inner);
+                TxtExecuteLog.Text = "Error: " + fullError + "\n\nLog file: " + ExecuteLogger.GetLogFilePath();
+                TxtExecuteStatus.Text = "Error.";
+                MessageBox.Show(this, "Execute failed:\n\n" + fullError + "\n\nSee log file for details.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
         catch (Exception ex)
         {
             string fullError = GetFullExceptionMessage(ex);
-            TxtExecuteLog.Text = "Error: " + fullError;
+            ExecuteLogger.Error("Execute failed", ex);
+            TxtExecuteLog.Text = "Error: " + fullError + "\n\nLog file: " + ExecuteLogger.GetLogFilePath();
             TxtExecuteStatus.Text = "Error.";
-            MessageBox.Show(this, "Execute failed:\n\n" + fullError, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, "Execute failed:\n\n" + fullError + "\n\nSee log file for details.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
             _executeCts?.Dispose();
             _executeCts = null;
             BtnExecute.IsEnabled = true;
+            BtnCancelExecute.IsEnabled = true;
+            BtnCancelExecute.Content = "Cancel";
             BtnCancelExecute.Visibility = Visibility.Collapsed;
             ExecuteProgressBar.Visibility = Visibility.Collapsed;
         }
@@ -540,7 +599,25 @@ public partial class MainWindow : Window
 
     private void BtnCancelExecute_Click(object sender, RoutedEventArgs e)
     {
-        _executeCts?.Cancel();
+        if (_executeCts == null) return;
+        BtnCancelExecute.IsEnabled = false;
+        BtnCancelExecute.Content = "Cancelling...";
+        _executeCts.Cancel();
+    }
+
+    private void BtnResumeFromCheckpoint_Click(object sender, RoutedEventArgs e)
+    {
+        var row = DbExecutor.ReadCheckpoint();
+        if (row.HasValue)
+        {
+            TxtExecuteStartRow.Text = row.Value.ToString();
+            TxtExecuteSkipRows.Text = "0";
+            MessageBox.Show(this, $"Start row set to {row.Value} from checkpoint.\n\nIf it crashes again at the same spot, set Skip rows to 500 or 1000 to jump past the problematic range, then click Execute.", "Resume from checkpoint", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        else
+        {
+            MessageBox.Show(this, "No checkpoint file found. Run Execute first to create one.", "No checkpoint", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
     }
 
     private static string GetFullExceptionMessage(Exception ex)

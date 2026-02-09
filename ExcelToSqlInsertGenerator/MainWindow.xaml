@@ -151,8 +151,12 @@
                 <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="4,2">
                     <TextBlock Text="Start row (0 = beginning):" VerticalAlignment="Center" Margin="0,0,4,0"/>
                     <TextBox x:Name="TxtExecuteStartRow" Width="70" Padding="4,2" VerticalContentAlignment="Center" Text="0" ToolTip="Resume from this row index (0-based) after a crash"/>
-                    <TextBlock Text="Chunk size (0 = all):" VerticalAlignment="Center" Margin="16,0,4,0"/>
-                    <TextBox x:Name="TxtExecuteChunkSize" Width="70" Padding="4,2" VerticalContentAlignment="Center" Text="0" ToolTip="Process only this many rows. Use 50000 for slow servers. Set Start row to resume after crash."/>
+                    <TextBlock Text="Skip rows (0 = none):" VerticalAlignment="Center" Margin="8,0,4,0"/>
+                    <TextBox x:Name="TxtExecuteSkipRows" Width="50" Padding="4,2" VerticalContentAlignment="Center" Text="0" ToolTip="Skip this many rows from Start row. Use 500–1000 to jump past a bad range that keeps crashing."/>
+                    <Button x:Name="BtnResumeFromCheckpoint" Content="Resume from checkpoint" Click="BtnResumeFromCheckpoint_Click" Padding="8,4" Margin="8,0,0,0" ToolTip="Read last saved row from checkpoint file. If it crashes again at same spot, add Skip rows (e.g. 500) to jump past."/>
+                    <CheckBox x:Name="ChkExecuteParallel" Content="Process in parallel" IsChecked="False" VerticalAlignment="Center" Margin="16,0,8,0" ToolTip="Divide rows into chunks and process chunks concurrently. Requires Chunk size &gt; 0."/>
+                    <TextBlock Text="Chunk size:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBox x:Name="TxtExecuteChunkSize" Width="70" Padding="4,2" VerticalContentAlignment="Center" Text="50000" ToolTip="Rows per chunk. Sequential: 0 = all. Parallel: required &gt; 0 (e.g. 50000)."/>
                 </StackPanel>
                 <ProgressBar x:Name="ExecuteProgressBar" Grid.Row="2" Height="4" Margin="4,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
                 <TextBlock x:Name="TxtExecuteStatus" Grid.Row="3" Margin="4" TextWrapping="Wrap" Visibility="Collapsed" Foreground="#333"/>

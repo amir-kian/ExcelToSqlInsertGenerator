@@ -20,8 +20,9 @@
 |----------|------|---------|-------|
 | CommandTimeoutSeconds | int | 300 | SQL command timeout in seconds for each INSERT or batch. Increase for slow servers. |
 | ConnectionTimeoutSeconds | int | 120 | Connection timeout in seconds when opening SQL connections. Applied to connection string when not already set. |
-| GcIntervalRows | int | 10000 | Run garbage collection every N rows to reduce memory growth during long runs. |
-| ConnectionChunkRows | int | 10000 | Number of rows per connection. Lower = more resilient to connection drops. |
+| GcIntervalRows | int | 5000 | Run garbage collection every N rows to reduce memory growth. Lower = less crash risk. |
+| ConnectionChunkRows | int | 5000 | Number of rows per connection. Lower = more resilient to silent crashes. |
+| CheckpointIntervalRows | int | 25000 | Write progress to temp file every N rows. Use "Resume from checkpoint" after silent crash. |
 | InsertBatchSize | int | 50 | Number of INSERT statements sent in a single batch to SQL Server. Higher = faster, but more memory per batch. |
 | MaxFailedRowsToKeep | int | 2000 | Maximum failed row details kept in memory. Extra failures are counted but not logged. |
 | ReportIntervalDivisor | int | 200 | Progress reports during Execute: about every (total rows / this value) rows. |

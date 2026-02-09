@@ -73,9 +73,11 @@ public class ExecuteSection
     /// <summary>Connection timeout in seconds. Applied to connection string when not already set.</summary>
     public int ConnectionTimeoutSeconds { get; set; } = 120;
     /// <summary>Run GC every N rows to reduce memory growth during long runs.</summary>
-    public int GcIntervalRows { get; set; } = 10_000;
-    /// <summary>Rows per connection. A new connection is opened after each chunk. Lower = more resilient to connection drops (default 10000).</summary>
-    public int ConnectionChunkRows { get; set; } = 10_000;
+    public int GcIntervalRows { get; set; } = 5_000;
+    /// <summary>Rows per connection. A new connection is opened after each chunk. Lower = more resilient to crashes (default 5000).</summary>
+    public int ConnectionChunkRows { get; set; } = 5_000;
+    /// <summary>Write progress checkpoint to file every N rows. If app crashes, check the file for last row to resume.</summary>
+    public int CheckpointIntervalRows { get; set; } = 25_000;
     /// <summary>Number of retries when opening connection fails (transient errors).</summary>
     public int ConnectionRetryCount { get; set; } = 2;
     /// <summary>Delay in milliseconds between connection retries.</summary>
@@ -90,6 +92,8 @@ public class ExecuteSection
     public int ReportIntervalDivisor { get; set; } = 200;
     /// <summary>Max length of ID value in failed row error logs.</summary>
     public int IdValueMaxLength { get; set; } = 50;
+    /// <summary>Max parallel chunks when processing in parallel mode. Each chunk uses its own connection.</summary>
+    public int MaxParallelChunks { get; set; } = 4;
 }
 
 /// <summary>Pre-execution validation settings.</summary>

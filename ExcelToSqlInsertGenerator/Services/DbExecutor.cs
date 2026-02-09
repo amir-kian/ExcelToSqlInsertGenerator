@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -217,7 +218,30 @@ public static class DbExecutor
         throw lastEx ?? new InvalidOperationException("Connection failed");
     }
 
-    /// <summary>Execute from source: connection retry, batch retry, try-catch with partial result on stop.</summary>
+    private static string CheckpointFilePath => Path.Combine(Path.GetTempPath(), "ExcelToSqlInsertGenerator_checkpoint.txt");
+
+    /// <summary>Read last checkpoint row from file. Returns null if no checkpoint exists.</summary>
+    public static int? ReadCheckpoint()
+    {
+        try
+        {
+            if (File.Exists(CheckpointFilePath) && int.TryParse(File.ReadAllText(CheckpointFilePath), out var row))
+                return row;
+        }
+        catch { /* ignore */ }
+        return null;
+    }
+
+    private static void WriteCheckpoint(int lastRow)
+    {
+        try
+        {
+            File.WriteAllText(CheckpointFilePath, lastRow.ToString());
+        }
+        catch { /* ignore */ }
+    }
+
+    /// <summary>Execute from source: checkpoint file, smaller chunks, LOH compaction, broad try-catch for silent crashes.</summary>
     public static ExecuteResult ExecuteFromSourceSafe(
         string connectionString,
         string insertTemplate,
@@ -229,24 +253,89 @@ public static class DbExecutor
         int chunkSize = 0)
     {
         int total = rows.Count;
+        ExecuteLogger.StartSession("Sequential", total, startRow, chunkSize);
+        try
+        {
+            var result = ExecuteFromSourceSafeCore(connectionString, insertTemplate, placeholders, rows, progress, token, startRow, chunkSize);
+            if (result.FailedRows.Count > 0)
+                ExecuteLogger.LogFailedRows(result.FailedRows.Select(f => (f.RowIndex, f.IdValue, f.ErrorMessage)).ToList());
+            ExecuteLogger.EndSession(result.Inserted, result.Failed, result.StoppedWithError);
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            ExecuteLogger.Info("Execute cancelled by user.");
+            ExecuteLogger.EndSession(0, 0, "Cancelled");
+            throw;
+        }
+        catch (OutOfMemoryException ex)
+        {
+            ExecuteLogger.Error("Out of memory in ExecuteFromSourceSafe", ex);
+            int lastRow = startRow;
+            try { lastRow = int.Parse(File.ReadAllText(CheckpointFilePath)); } catch { /* use startRow */ }
+            WriteCheckpoint(lastRow);
+            ExecuteLogger.EndSession(0, 0, ex.Message);
+            return new ExecuteResult(0, 0, new List<FailedRow>())
+            { StoppedWithError = "Out of memory. (Checkpoint saved. Set Start row to " + lastRow + " and run again, or use smaller Chunk size.)", LastProcessedRow = lastRow };
+        }
+        catch (Exception ex)
+        {
+            ExecuteLogger.Error("Unhandled exception in ExecuteFromSourceSafe", ex);
+            int lastRow = startRow;
+            try { lastRow = int.Parse(File.ReadAllText(CheckpointFilePath)); } catch { /* use startRow */ }
+            WriteCheckpoint(lastRow);
+            ExecuteLogger.EndSession(0, 0, ex.Message);
+            return new ExecuteResult(0, 0, new List<FailedRow>())
+            { StoppedWithError = ex.Message + " (Checkpoint saved. Set Start row to " + lastRow + " and run again.)", LastProcessedRow = lastRow };
+        }
+    }
+
+    private static ExecuteResult ExecuteFromSourceSafeCore(
+        string connectionString,
+        string insertTemplate,
+        List<SqlValuePlaceholder> placeholders,
+        List<Dictionary<string, object>> rows,
+        IProgress<(int current, int total)>? progress,
+        CancellationToken token,
+        int startRow,
+        int chunkSize,
+        bool writeCheckpoint = true)
+    {
+        int total = rows.Count;
         if (total == 0 || startRow >= total)
             return new ExecuteResult(0, 0, new List<FailedRow>());
 
         connectionString = EnsureConnectionTimeout(connectionString);
-
         int endRow = chunkSize > 0 ? Math.Min(startRow + chunkSize, total) : total;
-        int rangeTotal = endRow - startRow;
+        if (endRow > total) endRow = total;
+        if (endRow <= startRow)
+        {
+            ExecuteLogger.Info($"Core: no rows to process (startRow={startRow}, total={total})");
+            return new ExecuteResult(0, 0, new List<FailedRow>());
+        }
+        int rowCount = endRow - startRow;
+        ExecuteLogger.Info($"Core: processing rows {startRow}-{endRow - 1} (count={rowCount})");
         int inserted = 0;
         int failed = 0;
         var failedRows = new List<FailedRow>();
         string templateWithHint = AddRowLockHint(insertTemplate);
         int lastGcAt = startRow;
+        int checkpointInterval = Math.Max(1, AppSettings.Execute.CheckpointIntervalRows);
+        const int reportThrottleMs = 250;
+        long lastReportTicks = Environment.TickCount64;
 
         void Report()
         {
             int done = inserted + failed;
             if (progress != null)
-                progress.Report((startRow + done, total));
+            {
+                long now = Environment.TickCount64;
+                if (now - lastReportTicks >= reportThrottleMs || done == 0 || done == endRow - startRow)
+                {
+                    lastReportTicks = now;
+                    progress.Report((startRow + done, total));
+                }
+            }
         }
 
         int lastProcessedRow = startRow;
@@ -262,6 +351,7 @@ public static class DbExecutor
             }
             catch (Exception ex)
             {
+                ExecuteLogger.Error($"Connection open failed for chunk {chunkStart}-{chunkEnd}: {ex.Message}");
                 return new ExecuteResult(inserted, failed, failedRows)
                 { StoppedWithError = ex.Message, LastProcessedRow = lastProcessedRow };
             }
@@ -278,7 +368,7 @@ public static class DbExecutor
 
                     if (i - lastGcAt >= GcIntervalRows)
                     {
-                        GC.Collect();
+                        GC.Collect(2, GCCollectionMode.Optimized);
                         GC.WaitForPendingFinalizers();
                         lastGcAt = i;
                     }
@@ -303,6 +393,12 @@ public static class DbExecutor
                     {
                         ExecuteBatch(conn, batch, ref inserted, ref failed, failedRows);
                         batch.Clear();
+                        int done = startRow + inserted + failed;
+                        if (writeCheckpoint && done > 0 && done % checkpointInterval == 0)
+                        {
+                            WriteCheckpoint(done);
+                            ExecuteLogger.Info($"Checkpoint: row {done} (inserted={inserted}, failed={failed})");
+                        }
                         Report();
                         Thread.Sleep(0);
                     }
@@ -314,65 +410,91 @@ public static class DbExecutor
                     Report();
                 }
                 lastProcessedRow = startRow + inserted + failed;
+                if (writeCheckpoint) WriteCheckpoint(lastProcessedRow);
+                if (chunkEnd >= endRow)
+                    ExecuteLogger.Info($"Chunk complete up to row {lastProcessedRow} (inserted={inserted}, failed={failed})");
                 }
             }
             catch (Exception ex)
             {
                 lastProcessedRow = startRow + inserted + failed;
+                if (writeCheckpoint) WriteCheckpoint(lastProcessedRow);
+                ExecuteLogger.Error($"Exception in chunk {chunkStart}-{chunkEnd}: {ex.Message}", ex);
                 return new ExecuteResult(inserted, failed, failedRows)
                 { StoppedWithError = ex.Message, LastProcessedRow = lastProcessedRow };
             }
 
             void ExecuteBatch(SqlConnection connection, List<(int Index, string Sql)> batchItems, ref int ins, ref int fail, List<FailedRow> failedList)
             {
-                var sb = new System.Text.StringBuilder(batchItems.Count * 512);
-                foreach (var (_, s) in batchItems)
-                    sb.AppendLine(s);
-                string batchSql = sb.ToString();
-                int batchRetries = Math.Max(0, AppSettings.Execute.BatchRetryCount);
-                int batchDelayMs = Math.Max(0, AppSettings.Execute.ConnectionRetryDelayMs);
-
-                bool batchOk = false;
-                for (int attempt = 0; attempt <= batchRetries && !batchOk; attempt++)
+                try
                 {
-                    try
-                    {
-                        using var cmd = new SqlCommand(batchSql, connection);
-                        cmd.CommandTimeout = CommandTimeoutSeconds;
-                        cmd.ExecuteNonQuery();
-                        ins += batchItems.Count;
-                        batchOk = true;
-                    }
-                    catch when (attempt < batchRetries)
-                    {
-                        Thread.Sleep(batchDelayMs);
-                    }
-                }
+                    var sb = new System.Text.StringBuilder(Math.Min(batchItems.Count * 512, 10 * 1024 * 1024));
+                    foreach (var (_, s) in batchItems)
+                        sb.AppendLine(s);
+                    string batchSql = sb.ToString();
+                    int batchRetries = Math.Max(0, AppSettings.Execute.BatchRetryCount);
+                    int batchDelayMs = Math.Max(0, AppSettings.Execute.ConnectionRetryDelayMs);
 
-                if (!batchOk)
-                {
-                    foreach (var (idx, s) in batchItems)
+                    bool batchOk = false;
+                    for (int attempt = 0; attempt <= batchRetries && !batchOk; attempt++)
                     {
+                        SqlTransaction? tran = null;
                         try
                         {
-                            using var c = new SqlCommand(s, connection);
-                            c.CommandTimeout = CommandTimeoutSeconds;
-                            c.ExecuteNonQuery();
-                            ins++;
+                            tran = connection.BeginTransaction();
+                            using var cmd = new SqlCommand(batchSql, connection, tran);
+                            cmd.CommandTimeout = CommandTimeoutSeconds;
+                            cmd.ExecuteNonQuery();
+                            tran.Commit();
+                            tran = null;
+                            ins += batchItems.Count;
+                            batchOk = true;
                         }
-                        catch (Exception ex)
+                        catch when (attempt < batchRetries)
                         {
-                            fail++;
-                            string? idVal = null;
-                            try { idVal = TryExtractFirstValue(s); } catch { /* ignore */ }
-                            if (failedList.Count < MaxFailedRowsToKeep)
-                                failedList.Add(new FailedRow(idx + 2, idVal, ex.Message));
+                            try { tran?.Rollback(); } catch { /* ignore */ }
+                            Thread.Sleep(batchDelayMs);
+                        }
+                        catch
+                        {
+                            try { tran?.Rollback(); } catch { /* ignore */ }
                         }
                     }
+
+                    if (!batchOk)
+                    {
+                        ExecuteLogger.Warn($"Batch failed ({batchItems.Count} rows), falling back to row-by-row");
+                        for (int r = 0; r < batchItems.Count; r++)
+                        {
+                            try
+                            {
+                                var (idx, s) = batchItems[r];
+                                using var c = new SqlCommand(s, connection);
+                                c.CommandTimeout = CommandTimeoutSeconds;
+                                c.ExecuteNonQuery();
+                                ins++;
+                            }
+                            catch (Exception ex)
+                            {
+                                fail++;
+                                var (idx, s) = batchItems[r];
+                                ExecuteLogger.Info($"Row {idx + 2} failed in row-by-row: {ex.Message}");
+                                string? idVal = null;
+                                try { idVal = TryExtractFirstValue(s); } catch { /* ignore */ }
+                                if (failedList.Count < MaxFailedRowsToKeep)
+                                    failedList.Add(new FailedRow(idx + 2, idVal, ex.Message));
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ExecuteLogger.Error($"ExecuteBatch threw (batch size {batchItems.Count}): {ex.Message}", ex);
+                    throw;
                 }
             }
 
-            GC.Collect();
+            GC.Collect(2, GCCollectionMode.Optimized);
             GC.WaitForPendingFinalizers();
         }
 
@@ -381,7 +503,94 @@ public static class DbExecutor
             failedRows.Add(new FailedRow(-1, null, $"... and {failed - MaxFailedRowsToKeep} more failures (only first {MaxFailedRowsToKeep} logged)"));
         }
 
+        ExecuteLogger.Info($"Core complete: inserted={inserted}, failed={failed}, lastRow={startRow + inserted + failed}");
         return new ExecuteResult(inserted, failed, failedRows);
+    }
+
+    private static int MaxParallelChunks => Math.Max(1, Math.Min(AppSettings.Execute.MaxParallelChunks, 16));
+
+    /// <summary>Execute from source in parallel: divide rows into chunks of chunkSize, process chunks concurrently, aggregate success/failure report.</summary>
+    public static ExecuteResult ExecuteFromSourceParallelChunks(
+        string connectionString,
+        string insertTemplate,
+        List<SqlValuePlaceholder> placeholders,
+        List<Dictionary<string, object>> rows,
+        IProgress<(int current, int total)>? progress,
+        CancellationToken token,
+        int startRow = 0,
+        int chunkSize = 0)
+    {
+        int total = rows.Count;
+        if (total == 0 || startRow >= total)
+            return new ExecuteResult(0, 0, new List<FailedRow>());
+
+        ExecuteLogger.StartSession("Parallel", total, startRow, chunkSize);
+        connectionString = EnsureConnectionTimeout(connectionString);
+        int maxParallel = MaxParallelChunks;
+        int rowsToProcess = total - startRow;
+        int effectiveChunkSize = chunkSize > 0 ? Math.Min(chunkSize, rowsToProcess) : Math.Max(10000, rowsToProcess / maxParallel);
+
+        var chunkRanges = new List<(int ChunkStart, int ChunkEnd)>();
+        for (int s = startRow; s < total; s += effectiveChunkSize)
+            chunkRanges.Add((s, Math.Min(s + effectiveChunkSize, total)));
+
+        int totalInserted = 0;
+        int totalFailed = 0;
+        var allFailedRows = new ConcurrentBag<FailedRow>();
+        var chunkCompleted = new int[chunkRanges.Count];
+        const int reportThrottleMs = 250;
+        long lastReportTicks = Environment.TickCount64;
+        var progressLock = new object();
+
+        var options = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Min(maxParallel, chunkRanges.Count),
+            CancellationToken = token
+        };
+
+        Parallel.For(0, chunkRanges.Count, options, chunkIndex =>
+        {
+            var (chunkStart, chunkEnd) = chunkRanges[chunkIndex];
+            int chunkRows = chunkEnd - chunkStart;
+            var chunkProgress = new Progress<(int current, int total)>(p =>
+            {
+                int doneInChunk = p.current - chunkStart;
+                Interlocked.Exchange(ref chunkCompleted[chunkIndex], doneInChunk);
+                if (progress != null)
+                {
+                    lock (progressLock)
+                    {
+                        long now = Environment.TickCount64;
+                        if (now - lastReportTicks >= reportThrottleMs)
+                        {
+                            lastReportTicks = now;
+                            int sum = 0;
+                            for (int i = 0; i < chunkCompleted.Length; i++)
+                                sum += Volatile.Read(ref chunkCompleted[i]);
+                            progress.Report((startRow + sum, total));
+                        }
+                    }
+                }
+            });
+            var result = ExecuteFromSourceSafeCore(connectionString, insertTemplate, placeholders, rows,
+                chunkProgress, token, chunkStart, chunkRows, writeCheckpoint: false);
+            Interlocked.Add(ref totalInserted, result.Inserted);
+            Interlocked.Add(ref totalFailed, result.Failed);
+            foreach (var fr in result.FailedRows)
+                allFailedRows.Add(fr);
+        });
+
+        if (progress != null)
+            progress.Report((total, total));
+
+        var failedRowsList = allFailedRows.OrderBy(f => f.RowIndex).ToList();
+        if (totalFailed > MaxFailedRowsToKeep && failedRowsList.Count > MaxFailedRowsToKeep)
+            failedRowsList.Add(new FailedRow(-1, null, $"... and {totalFailed - MaxFailedRowsToKeep} more failures (only first {MaxFailedRowsToKeep} logged)"));
+
+        if (failedRowsList.Count > 0)
+            ExecuteLogger.LogFailedRows(failedRowsList.Select(f => (f.RowIndex, f.IdValue, f.ErrorMessage)).ToList());
+        ExecuteLogger.EndSession(totalInserted, totalFailed);
+        return new ExecuteResult(totalInserted, totalFailed, failedRowsList);
     }
 
     /// <summary>Execute from source in parallel - multiple workers, each with own connection. Faster but may cause crashes under load.</summary>
